@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# Muxmaster Media Library Encoder v1.5.0
+# Muxmaster Media Library Encoder v1.6.0
 # Comprehensive HEVC/AAC encoding for Jellyfin optimization
 #===============================================================================
 
@@ -22,7 +22,7 @@ CPU_PIX_FMT="yuv420p10le"
 OUTPUT_CONTAINER="mkv"
 KEYFRAME_INT=48
 AUDIO_CHANNELS=2
-AUDIO_BITRATE="224k"
+AUDIO_BITRATE="256k"
 FFMPEG_PROBESIZE="100M"
 FFMPEG_ANALYZEDURATION="100M"
 
@@ -58,13 +58,13 @@ SMART_QUALITY=true
 INPUT_DIR=""
 OUTPUT_DIR=""
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 
 # Temp file tracking for cleanup
 declare -a TEMP_FILES=()
 
 # ANSI color palette
-RED=""; GREEN=""; YELLOW=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
+RED=""; GREEN=""; YELLOW=""; ORANGE=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
 
 #------------------------------------------------------------------------------
 # Cleanup trap - ensures temp files are removed on exit/interrupt
@@ -105,12 +105,13 @@ init_colors() {
         RED=$'\033[1;91m'
         GREEN=$'\033[1;92m'
         YELLOW=$'\033[1;93m'
+        ORANGE=$'\033[1;38;5;208m'
         BLUE=$'\033[1;94m'
         CYAN=$'\033[1;96m'
         MAGENTA=$'\033[1;95m'
         NC=$'\033[0m'
     else
-        RED=""; GREEN=""; YELLOW=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
+        RED=""; GREEN=""; YELLOW=""; ORANGE=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
     fi
 }
 
@@ -164,6 +165,7 @@ log_success() { log_line "SUCCESS" "$GREEN" "$1"; }
 log_warn()    { log_line "WARN" "$YELLOW" "$1"; }
 log_error()   { log_line "ERROR" "$RED" "$1"; }
 log_render()  { log_line "RENDER" "$MAGENTA" "$1"; }
+log_outlier() { log_line "OUTLIER" "$ORANGE" "$1"; }
 log_debug()   { [[ "$VERBOSE" == true ]] && log_line "DEBUG" "$CYAN" "$1"; return 0; }
 
 #------------------------------------------------------------------------------
@@ -224,7 +226,7 @@ Utility:
   -V, --version             Print version
   -h, --help                Help
 
-Encoding: 10-bit HEVC, copy AAC or encode non-AAC to AAC, MKV container, metadata preserved
+Encoding: 10-bit HEVC, copy AAC or encode non-AAC to AAC (default 256k), MKV container, metadata preserved
 EOF
     exit "$exit_code"
 }
@@ -259,6 +261,22 @@ normalize_dir_arg() {
 trim_whitespace() {
     local input="$1"
     printf '%s\n' "$input" | sed -E 's/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+extract_parent_season_hint() {
+    local parent="$1"
+
+    if [[ "$parent" =~ (^|[^[:alnum:]])[Ss]eason[[:space:]_.-]*([0-9]{1,2})([^[:alnum:]]|$) ]]; then
+        printf '%d\n' "$((10#${BASH_REMATCH[2]}))"
+        return 0
+    fi
+
+    if [[ "$parent" =~ (^|[^[:alnum:]])[Ss]([0-9]{1,2})([^[:alnum:]]|$) ]]; then
+        printf '%d\n' "$((10#${BASH_REMATCH[2]}))"
+        return 0
+    fi
+
+    printf '\n'
 }
 
 clamp_int() {
@@ -445,6 +463,34 @@ get_file_size() {
         stat -f%z "$file" 2>/dev/null || echo 0
     else
         stat -c%s "$file" 2>/dev/null || echo 0
+    fi
+}
+
+# Human-readable byte formatter for final summary reporting.
+format_bytes() {
+    local bytes="$1"
+    local sign=""
+    local -a units=(B KiB MiB GiB TiB PiB)
+    local unit_index=0
+    local remainder=0
+
+    [[ "$bytes" =~ ^-?[0-9]+$ ]] || { printf 'unknown\n'; return 0; }
+
+    if (( bytes < 0 )); then
+        sign="-"
+        bytes=$((-bytes))
+    fi
+
+    while (( bytes >= 1024 && unit_index < ${#units[@]} - 1 )); do
+        remainder=$((bytes % 1024))
+        bytes=$((bytes / 1024))
+        ((unit_index++))
+    done
+
+    if (( unit_index == 0 )); then
+        printf '%s%d %s\n' "$sign" "$bytes" "${units[$unit_index]}"
+    else
+        printf '%s%d.%d %s\n' "$sign" "$bytes" "$((remainder * 10 / 1024))" "${units[$unit_index]}"
     fi
 }
 
@@ -644,6 +690,70 @@ get_primary_video_bitrate_label() {
     local bitrate_bps
     bitrate_bps=$(get_primary_video_bitrate_bps "$1")
     format_bitrate_label "$bitrate_bps"
+}
+
+#------------------------------------------------------------------------------
+# Source bitrate outlier detection by resolution tier
+#------------------------------------------------------------------------------
+# Returns: low_kbps<TAB>high_kbps<TAB>tier_label
+get_expected_bitrate_range_kbps() {
+    local resolution="$1"
+    local width height pixels
+
+    if [[ "$resolution" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+        width="${BASH_REMATCH[1]}"
+        height="${BASH_REMATCH[2]}"
+        pixels=$((width * height))
+    else
+        printf '0\t0\tunknown\n'
+        return 0
+    fi
+
+    # Conservative ranges to flag obvious bitrate outliers without over-triggering.
+    if (( pixels <= 640 * 360 )); then
+        printf '250\t1800\t<=360p\n'
+    elif (( pixels <= 854 * 480 )); then
+        printf '500\t2500\t<=480p\n'
+    elif (( pixels <= 1280 * 720 )); then
+        printf '1000\t5000\t<=720p\n'
+    elif (( pixels <= 1920 * 1080 )); then
+        printf '2500\t10000\t<=1080p\n'
+    elif (( pixels <= 2560 * 1440 )); then
+        printf '5000\t18000\t<=1440p\n'
+    elif (( pixels <= 3840 * 2160 )); then
+        printf '10000\t45000\t<=2160p\n'
+    else
+        printf '15000\t65000\t>2160p\n'
+    fi
+}
+
+# Returns: status<TAB>source_kbps<TAB>low_kbps<TAB>high_kbps<TAB>tier_label
+# status is one of: high, low, normal, unknown
+assess_bitrate_outlier() {
+    local resolution="$1"
+    local bitrate_bps="$2"
+    local bitrate_kbps low_kbps high_kbps tier_label
+
+    if ! [[ "$bitrate_bps" =~ ^[0-9]+$ && "$bitrate_bps" -gt 0 ]]; then
+        printf 'unknown\t0\t0\t0\tunknown\n'
+        return 0
+    fi
+
+    bitrate_kbps=$(((bitrate_bps + 500) / 1000))
+    IFS=$'\t' read -r low_kbps high_kbps tier_label <<< "$(get_expected_bitrate_range_kbps "$resolution")"
+
+    if ! [[ "$low_kbps" =~ ^[0-9]+$ && "$high_kbps" =~ ^[0-9]+$ && "$high_kbps" -gt "$low_kbps" ]]; then
+        printf 'unknown\t%s\t0\t0\t%s\n' "$bitrate_kbps" "${tier_label:-unknown}"
+        return 0
+    fi
+
+    if (( bitrate_kbps < low_kbps )); then
+        printf 'low\t%s\t%s\t%s\t%s\n' "$bitrate_kbps" "$low_kbps" "$high_kbps" "$tier_label"
+    elif (( bitrate_kbps > high_kbps )); then
+        printf 'high\t%s\t%s\t%s\t%s\n' "$bitrate_kbps" "$low_kbps" "$high_kbps" "$tier_label"
+    else
+        printf 'normal\t%s\t%s\t%s\t%s\n' "$bitrate_kbps" "$low_kbps" "$high_kbps" "$tier_label"
+    fi
 }
 
 #------------------------------------------------------------------------------
@@ -1204,9 +1314,10 @@ compute_smart_quality_settings() {
         fi
     fi
 
-    selected_cpu_crf=$(clamp_int "$((CPU_CRF + cpu_adj))" 16 30)
-    selected_vaapi_qp=$(clamp_int "$((VAAPI_QP + vaapi_adj))" 14 36)
-    note="smart (${resolution_label}, ${bitrate_label}, cpu_adj=${cpu_adj}->CRF=${selected_cpu_crf}, vaapi_adj=${vaapi_adj}->QP=${selected_vaapi_qp}, mode=${ENCODER_MODE})"
+    # V1.6 tuning: lower smart-selected quality values by 1 step for both render paths.
+    selected_cpu_crf=$(clamp_int "$((CPU_CRF + cpu_adj - 1))" 16 30)
+    selected_vaapi_qp=$(clamp_int "$((VAAPI_QP + vaapi_adj - 1))" 14 36)
+    note="smart (${resolution_label}, ${bitrate_label}, cpu_adj=${cpu_adj}, vaapi_adj=${vaapi_adj}, smart_bias=-1, cpu_crf=${selected_cpu_crf}, vaapi_qp=${selected_vaapi_qp}, mode=${ENCODER_MODE})"
 
     printf '%s\t%s\t%s\n' "$selected_vaapi_qp" "$selected_cpu_crf" "$note"
 }
@@ -1333,13 +1444,83 @@ describe_attachment_plan() {
     fi
 }
 
+# Compact status labels for one-line INFO summaries.
+describe_audio_plan_compact() {
+    local input="$1"
+    local stream_count codec i transcode_count=0 copy_count=0
+
+    stream_count=$(get_stream_count "a" "$input")
+    if [[ "$stream_count" -eq 0 ]]; then
+        printf 'none'
+        return 0
+    fi
+
+    for ((i=0; i<stream_count; i++)); do
+        codec=$(get_audio_codec "$input" "$i")
+        if [[ "$codec" == "aac" ]]; then
+            ((copy_count++))
+        else
+            ((transcode_count++))
+        fi
+    done
+
+    if [[ "$transcode_count" -eq 0 ]]; then
+        printf 'copy AAC'
+    elif [[ "$copy_count" -eq 0 ]]; then
+        printf 'AAC %s' "$AUDIO_BITRATE"
+    else
+        printf 'copy + AAC %s' "$AUDIO_BITRATE"
+    fi
+}
+
+describe_subs_attachments_compact() {
+    local input="$1" include_subtitles="$2" include_attachments="$3"
+    local subtitle_count attachment_count subtitle_action attachment_action
+
+    subtitle_count=$(get_stream_count "s" "$input")
+    attachment_count=$(get_stream_count "t" "$input")
+
+    if [[ "$KEEP_SUBTITLES" != true || "$include_subtitles" != true ]]; then
+        subtitle_action="subs off"
+    elif [[ "$subtitle_count" -eq 0 ]]; then
+        subtitle_action="subs none"
+    elif output_container_is_mp4; then
+        if has_bitmap_subtitles "$input"; then
+            subtitle_action="subs skip-bitmap"
+        else
+            subtitle_action="subs mov_text"
+        fi
+    else
+        subtitle_action="subs copy"
+    fi
+
+    if [[ "$KEEP_ATTACHMENTS" != true || "$include_attachments" != true ]]; then
+        attachment_action="att off"
+    elif [[ "$attachment_count" -eq 0 ]]; then
+        attachment_action="att none"
+    elif output_container_is_mp4; then
+        attachment_action="att off(MP4)"
+    else
+        attachment_action="att copy"
+    fi
+
+    if [[ "$subtitle_action" == "subs copy" && "$attachment_action" == "att copy" ]]; then
+        printf 'copy'
+    elif [[ "$subtitle_action" == "subs none" && "$attachment_action" == "att none" ]]; then
+        printf 'none'
+    else
+        printf '%s, %s' "$subtitle_action" "$attachment_action"
+    fi
+}
+
 log_encode_render_plan() {
     local input="$1" video_stream_idx="$2" include_subtitles="$3" include_attachments="$4" muxing_queue_size="$5" timestamp_fix="$6" selected_vaapi_qp="$7" selected_cpu_crf="$8" quality_mode_note="$9"
     local source_video_codec source_codec_label
-    local audio_plan subtitle_plan attachment_plan container_plan hdr_plan deinterlace_plan video_plan hdr_type
+    local container_plan
     local input_resolution input_bitrate_bps input_bitrate_label
     local est_low_kbps est_high_kbps est_low_pct est_high_pct
     local audio_conversion video_conversion bitrate_conversion
+    local video_compact audio_compact subs_att_compact est_bitrate_compact
 
     source_video_codec=$(get_primary_video_codec "$input")
     [[ -z "$source_video_codec" ]] && source_video_codec=$(get_codec "$input")
@@ -1349,77 +1530,49 @@ log_encode_render_plan() {
     input_bitrate_label=$(format_bitrate_label "$input_bitrate_bps")
     IFS=$'\t' read -r est_low_kbps est_high_kbps est_low_pct est_high_pct <<< "$(estimate_transcode_video_output_range "$input_resolution" "$input_bitrate_bps" "$source_codec_label" "$selected_vaapi_qp" "$selected_cpu_crf")"
 
-    if [[ "$ENCODER_MODE" == "vaapi" ]]; then
-        video_plan="transcode=yes (stream ${video_stream_idx}: ${source_codec_label} -> hevc_vaapi, profile=${VAAPI_PROFILE}, QP=${selected_vaapi_qp}, keyint=${KEYFRAME_INT})"
-    else
-        video_plan="transcode=yes (stream ${video_stream_idx}: ${source_codec_label} -> libx265, CRF=${selected_cpu_crf}, preset=${CPU_PRESET}, profile=${CPU_HEVC_PROFILE}, pix_fmt=${CPU_PIX_FMT}, keyint=${KEYFRAME_INT})"
-    fi
-
-    audio_plan=$(describe_audio_plan "$input")
+    audio_compact=$(describe_audio_plan_compact "$input")
     audio_conversion=$(describe_audio_conversion_short "$input")
-    subtitle_plan=$(describe_subtitle_plan "$input" "$include_subtitles")
-    attachment_plan=$(describe_attachment_plan "$input" "$include_attachments")
+    subs_att_compact=$(describe_subs_attachments_compact "$input" "$include_subtitles" "$include_attachments")
 
     if output_container_is_mp4; then
-        container_plan="MP4 (faststart + hvc1 tag)"
+        container_plan="MP4"
     else
         container_plan="${OUTPUT_CONTAINER^^}"
     fi
 
-    hdr_type=$(detect_hdr_type "$input")
-    if [[ "$hdr_type" == "hdr10" && "$HANDLE_HDR" == "tonemap" ]]; then
-        hdr_plan="tonemap HDR -> SDR"
-    elif [[ "$hdr_type" == "hdr10" && "$HANDLE_HDR" == "preserve" ]]; then
-        hdr_plan="preserve HDR metadata"
-    else
-        hdr_plan="no HDR transform"
-    fi
-
-    if [[ "$DEINTERLACE_AUTO" == true ]] && is_interlaced "$input"; then
-        deinterlace_plan="auto=yadif (interlaced source detected)"
-    elif [[ "$DEINTERLACE_AUTO" == true ]]; then
-        deinterlace_plan="auto=enabled (progressive source, no yadif)"
-    else
-        deinterlace_plan="disabled"
-    fi
-
     if [[ "$ENCODER_MODE" == "vaapi" ]]; then
         video_conversion="$(format_codec_label "$source_codec_label") -> HEVC (VAAPI QP=${selected_vaapi_qp})"
+        video_compact="${input_resolution} $(format_codec_label "$source_codec_label") -> HEVC QP${selected_vaapi_qp}"
     else
         video_conversion="$(format_codec_label "$source_codec_label") -> HEVC (x265 CRF=${selected_cpu_crf})"
+        video_compact="${input_resolution} $(format_codec_label "$source_codec_label") -> HEVC CRF${selected_cpu_crf}"
     fi
 
     if [[ "$est_low_kbps" != "unknown" ]]; then
         bitrate_conversion="${input_bitrate_label} -> ~${est_low_kbps}-${est_high_kbps} kb/s"
+        est_bitrate_compact="~${est_low_kbps}-${est_high_kbps} kb/s"
     else
         bitrate_conversion="${input_bitrate_label} -> unknown"
+        est_bitrate_compact="unknown"
     fi
 
-    log_info "Pre-flight render params:"
+    # Keep INFO output compact: one concise summary line per file.
     log_render "Conversion: audio ${audio_conversion} | video ${video_conversion} | bitrate ${bitrate_conversion}"
-    log_info "  Quality mode: ${quality_mode_note}"
-    log_info "  Input video: ${input_resolution} | ${input_bitrate_label} | ${source_codec_label}"
+    log_info "Video: ${video_compact} | Audio: ${audio_compact} | Container: ${container_plan} | Subtitles/Attachments: ${subs_att_compact} | Est. bitrate: ${est_bitrate_compact}"
+    log_debug "  Quality mode: ${quality_mode_note}"
+    log_debug "  Retry knobs: mux_queue=${muxing_queue_size}, timestamp_fix=${timestamp_fix}, stream=${video_stream_idx}"
     if [[ "$est_low_kbps" != "unknown" ]]; then
-        log_info "  Estimated output: video ~${est_low_kbps}-${est_high_kbps} kb/s (~${est_low_pct}-${est_high_pct}% of source bitrate, rough)"
-    else
-        log_info "  Estimated output: unavailable (could not determine source bitrate)"
+        log_debug "  Estimate detail: ~${est_low_kbps}-${est_high_kbps} kb/s (~${est_low_pct}-${est_high_pct}% of source bitrate, rough)"
     fi
-    log_info "  Video: ${video_plan}"
-    log_info "  Audio: ${audio_plan}"
-    log_info "  Container: ${container_plan}"
-    log_info "  Subtitles: ${subtitle_plan}"
-    log_info "  Attachments: ${attachment_plan}"
-    log_info "  HDR: ${hdr_plan}"
-    log_info "  Deinterlace: ${deinterlace_plan}"
-    log_info "  Retry knobs: mux_queue=${muxing_queue_size}, timestamp_fix=${timestamp_fix}"
 }
 
 log_remux_render_plan() {
     local input="$1" video_stream_idx="$2" include_subtitles="$3" include_attachments="$4" muxing_queue_size="$5" timestamp_fix="$6"
     local source_video_codec source_profile source_pix_fmt
-    local audio_plan subtitle_plan attachment_plan container_plan
+    local container_plan
     local input_resolution input_bitrate_bps input_bitrate_label
     local audio_conversion video_conversion bitrate_conversion
+    local video_compact audio_compact subs_att_compact
 
     source_video_codec=$(get_primary_video_codec "$input")
     [[ -z "$source_video_codec" ]] && source_video_codec=$(get_codec "$input")
@@ -1429,30 +1582,25 @@ log_remux_render_plan() {
     input_bitrate_bps=$(get_primary_video_bitrate_bps "$input")
     input_bitrate_label=$(format_bitrate_label "$input_bitrate_bps")
 
-    audio_plan=$(describe_audio_plan "$input")
+    audio_compact=$(describe_audio_plan_compact "$input")
     audio_conversion=$(describe_audio_conversion_short "$input")
-    subtitle_plan=$(describe_subtitle_plan "$input" "$include_subtitles")
-    attachment_plan=$(describe_attachment_plan "$input" "$include_attachments")
+    subs_att_compact=$(describe_subs_attachments_compact "$input" "$include_subtitles" "$include_attachments")
 
     if output_container_is_mp4; then
-        container_plan="MP4 (faststart + hvc1 tag)"
+        container_plan="MP4"
     else
         container_plan="${OUTPUT_CONTAINER^^}"
     fi
 
     video_conversion="$(format_codec_label "${source_video_codec:-unknown}") -> $(format_codec_label "${source_video_codec:-unknown}") (copy)"
     bitrate_conversion="${input_bitrate_label} -> ~same (video copy)"
+    video_compact="${input_resolution} $(format_codec_label "${source_video_codec:-unknown}") -> copy"
 
-    log_info "Pre-flight render params:"
+    # Keep INFO output compact: one concise summary line per file.
     log_render "Conversion: audio ${audio_conversion} | video ${video_conversion} | bitrate ${bitrate_conversion}"
-    log_info "  Input video: ${input_resolution} | ${input_bitrate_label} | ${source_video_codec:-unknown}"
-    log_info "  Estimated output: video copied (~same bitrate); total file size depends on audio/subtitles/container"
-    log_info "  Video: transcode=no (copy stream ${video_stream_idx}: ${source_video_codec:-unknown}, profile=${source_profile:-unknown}, pix_fmt=${source_pix_fmt:-unknown})"
-    log_info "  Audio: ${audio_plan}"
-    log_info "  Container: ${container_plan}"
-    log_info "  Subtitles: ${subtitle_plan}"
-    log_info "  Attachments: ${attachment_plan}"
-    log_info "  Retry knobs: mux_queue=${muxing_queue_size}, timestamp_fix=${timestamp_fix}"
+    log_info "Video: ${video_compact} | Audio: ${audio_compact} | Container: ${container_plan} | Subtitles/Attachments: ${subs_att_compact} | Est. bitrate: ~same (video copy)"
+    log_debug "  Video copy detail: stream=${video_stream_idx}, profile=${source_profile:-unknown}, pix_fmt=${source_pix_fmt:-unknown}"
+    log_debug "  Retry knobs: mux_queue=${muxing_queue_size}, timestamp_fix=${timestamp_fix}"
 }
 
 #------------------------------------------------------------------------------
@@ -1694,8 +1842,26 @@ run_encode_attempt() {
 #------------------------------------------------------------------------------
 parse_filename() {
     local filename="$1"
-    local parent="$2"
+    local parent_input="$2"
+    local parent="$parent_input"
+    local parent_lower
     local base="${filename%.*}"
+
+    # If parse context is a full path and we're inside a "specials-like" subfolder,
+    # prefer the grandparent folder as naming context (helps NC/Extras layouts).
+    if [[ "$parent_input" == */* ]]; then
+        parent=$(basename "$parent_input")
+        parent_lower="${parent,,}"
+        case "$parent_lower" in
+            extras|extra|specials|bonus|featurettes|nc|ncop*|nced*)
+                local grandparent
+                grandparent=$(basename "$(dirname "$parent_input")")
+                if [[ -n "$grandparent" && "$grandparent" != "." && "$grandparent" != "/" ]]; then
+                    parent="$grandparent"
+                fi
+                ;;
+        esac
+    fi
 
     MEDIA_TYPE="" SHOW_NAME="" SEASON="" EPISODE="" MOVIE_NAME="" YEAR=""
 
@@ -1735,6 +1901,21 @@ parse_filename() {
             show_from_parent=$(trim_whitespace "$(echo "$parent" | tr '._' ' ' | sed -E 's/[[:space:]]+[Ss][0-9]{1,2}([[:space:]].*)?$//' | sed 's/[[:space:]-]*$//')")
             [[ -z "$show_from_parent" ]] && show_from_parent=$(trim_whitespace "$(echo "$parent" | tr '._' ' ')")
             SHOW_NAME="$show_from_parent"
+        fi
+    # Creditless OP/ED often use numeric index syntax (e.g. "Show - 001 - ... [Creditless Opening]").
+    # Map these to TV specials to avoid collisions with normal episodes.
+    elif [[ "$base" =~ ^(\[.+\][[:space:]]*)?(.+)[[:space:]_.-]+([0-9]{1,3})[[:space:]]*-[[:space:]]+.*\[(Creditless[[:space:]]+Opening|Creditless[[:space:]]+Ending)\] ]]; then
+        local special_num creditless_kind
+        MEDIA_TYPE="tv"
+        SHOW_NAME=$(trim_whitespace "$(echo "${BASH_REMATCH[2]}" | tr '._' ' ' | sed 's/[[:space:]-]*$//')")
+        SEASON="0"
+        special_num="${BASH_REMATCH[3]}"
+        special_num=$((10#$special_num))
+        creditless_kind=$(printf '%s' "${BASH_REMATCH[4]}" | tr '[:upper:]' '[:lower:]')
+        if [[ "$creditless_kind" == *"opening"* ]]; then
+            EPISODE=$((100 + special_num))
+        else
+            EPISODE=$((200 + special_num))
         fi
     # Episodic keyword pattern: Show - Episode 16.5 - Title
     elif [[ "$base" =~ ^(\[.+\][[:space:]]*)?(.+)[[:space:]_.-]+[Ee]pisode[[:space:]_.-]+([0-9]{1,3})([._]([0-9]{1,2}))?([[:space:]][^-]*)?[[:space:]]*-[[:space:]]+(.+)$ ]]; then
@@ -1860,6 +2041,18 @@ parse_filename() {
     MOVIE_NAME=$(echo "$MOVIE_NAME" | sed 's/\b\(.\)/\u\1/g')
 
     # Fallbacks
+    # If a parent folder clearly indicates a higher season (e.g. "S2"/"Season 2"),
+    # prefer that hint for season-less episodic naming that defaulted to Season 01.
+    if [[ "$MEDIA_TYPE" == "tv" && "$SEASON" =~ ^[0-9]+$ ]]; then
+        local parent_season_hint
+        parent_season_hint=$(extract_parent_season_hint "$parent")
+        if [[ "$parent_season_hint" =~ ^[0-9]+$ ]]; then
+            if (( 10#$SEASON == 1 && parent_season_hint > 1 )); then
+                SEASON="$parent_season_hint"
+            fi
+        fi
+    fi
+
     [[ "$MEDIA_TYPE" == "tv" && -z "$SHOW_NAME" ]] && SHOW_NAME="Unknown"
     [[ "$MEDIA_TYPE" == "movie" && -z "$MOVIE_NAME" ]] && MOVIE_NAME="Unknown"
 
@@ -2007,6 +2200,7 @@ process_files() {
         -type f -regextype posix-extended -iregex ".*\.($exts)$" -print0 | sort -z)
 
     local total=${#files[@]} current=0 encoded=0 skipped=0 failed=0
+    local total_input_bytes=0 total_output_bytes=0
 
     log_info "Found $total files"
     local profile_label="$CPU_HEVC_PROFILE"
@@ -2068,14 +2262,17 @@ process_files() {
             continue
         fi
 
-        parse_filename "$(basename "$f")" "$(basename "$(dirname "$f")")"
+        parse_filename "$(basename "$f")" "$(dirname "$f")"
         local out
         out=$(get_output_path)
-        local video_codec video_resolution video_bitrate_label
+        local video_codec video_resolution video_bitrate_bps video_bitrate_label
+        local bitrate_outlier_status source_bitrate_kbps outlier_low_kbps outlier_high_kbps outlier_tier
         video_codec=$(get_primary_video_codec "$f")
         [[ -z "$video_codec" ]] && video_codec=$(get_codec "$f")
         video_resolution=$(get_primary_video_resolution "$f")
-        video_bitrate_label=$(get_primary_video_bitrate_label "$f")
+        video_bitrate_bps=$(get_primary_video_bitrate_bps "$f")
+        video_bitrate_label=$(format_bitrate_label "$video_bitrate_bps")
+        IFS=$'\t' read -r bitrate_outlier_status source_bitrate_kbps outlier_low_kbps outlier_high_kbps outlier_tier <<< "$(assess_bitrate_outlier "$video_resolution" "$video_bitrate_bps")"
 
         log_debug "Primary video stream: index=${video_idx}, codec=${video_codec:-unknown}"
 
@@ -2087,6 +2284,11 @@ process_files() {
             local interlace_label=""
             is_interlaced "$f" && interlace_label=" [Interlaced]"
             log_info "  Video: ${video_resolution} | ${video_bitrate_label} | ${video_codec:-unknown}${hdr_label}${interlace_label}"
+        fi
+
+        # Flag unusual bitrate-vs-resolution combinations to aid source triage.
+        if [[ "$bitrate_outlier_status" == "high" || "$bitrate_outlier_status" == "low" ]]; then
+            log_outlier "  Bitrate outlier (${bitrate_outlier_status}): ${source_bitrate_kbps} kb/s for ${video_resolution}; expected ${outlier_low_kbps}-${outlier_high_kbps} kb/s (${outlier_tier})"
         fi
 
         # Check if already HEVC - copy video, encode audio only
@@ -2187,6 +2389,8 @@ process_files() {
                 in_sz=$(get_file_size "$f")
                 out_sz=$(get_file_size "$out")
                 [[ $in_sz -gt 0 ]] && ratio=$((out_sz * 100 / in_sz)) || ratio=100
+                total_input_bytes=$((total_input_bytes + in_sz))
+                total_output_bytes=$((total_output_bytes + out_sz))
                 log_success "Remuxed in ${elapsed_rm}s (${ratio}% of original)"
                 ((encoded++))
                 echo
@@ -2203,14 +2407,33 @@ process_files() {
 
         if encode_file "$f" "$out" "$video_idx"; then
             ((encoded++))
+            if [[ "$DRY_RUN" != true && -f "$out" ]]; then
+                local enc_in_sz enc_out_sz
+                enc_in_sz=$(get_file_size "$f")
+                enc_out_sz=$(get_file_size "$out")
+                total_input_bytes=$((total_input_bytes + enc_in_sz))
+                total_output_bytes=$((total_output_bytes + enc_out_sz))
+            fi
         else
             ((failed++))
         fi
         echo
     done
 
+    # End-of-run summary includes processed count and aggregate space savings.
+    local total_space_saved_bytes=$((total_input_bytes - total_output_bytes))
+
     log_info "=============================="
     log_info "Done: $encoded encoded, $skipped skipped, $failed failed"
+    log_info "Summary report:"
+    log_info "  Total files processed: $current"
+    if [[ "$DRY_RUN" == true ]]; then
+        log_info "  Total space saved: n/a (dry run)"
+    elif (( total_space_saved_bytes >= 0 )); then
+        log_success "  Total space saved: $(format_bytes "$total_space_saved_bytes") (input $(format_bytes "$total_input_bytes") -> output $(format_bytes "$total_output_bytes"))"
+    else
+        log_warn "  Total space saved: -$(format_bytes "$((-total_space_saved_bytes))") (overall output is larger)"
+    fi
 
     return 0
 }

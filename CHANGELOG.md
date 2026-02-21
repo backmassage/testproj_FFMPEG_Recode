@@ -8,6 +8,24 @@ All notable changes to this project are documented in this file.
 
 - No unreleased changes yet.
 
+## [1.6.0] - 2026-02-20
+
+### Changed
+
+- Bumped bundled script version to `Muxmaster.sh v1.6.0`.
+- Updated README release metadata and defaults for `1.6.0`.
+- Increased default non-AAC encode bitrate to `AAC 256k` (48kHz, up to stereo).
+- Added source bitrate outlier analysis (resolution-aware thresholds) and orange-highlighted outlier logging.
+- Updated smart quality behavior to apply a v1.6 `-1` bias to selected CPU CRF and VAAPI QP values.
+- Condensed per-file pre-flight `[INFO]` output into a single readable status line (video/audio/container/subtitles-attachments/estimated bitrate).
+- Kept `[RENDER]` conversion summaries while moving deep render internals to debug-level output.
+- Added end-of-run reporting for total files processed and aggregate space savings (input bytes vs output bytes).
+
+### Fixed
+
+- Corrected smart-quality reporting details so debug notes explicitly reflect the v1.6 `-1` smart-bias and selected CRF/QP values.
+- Refined compact audio status text to correctly distinguish copy-only, transcode-only, and mixed copy+transcode audio cases.
+
 ## [1.5.0] - 2026-02-19
 
 ### Changed

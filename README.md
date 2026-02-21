@@ -2,8 +2,8 @@
 
 > A resilient batch encoder/remuxer for Jellyfin-style media libraries.
 
-Release version: **1.5.0**  
-Bundled core script: **Muxmaster.sh v1.5.0**
+Release version: **1.6.0**  
+Bundled core script: **Muxmaster.sh v1.6.0**
 
 ## Highlights
 
@@ -11,9 +11,10 @@ Bundled core script: **Muxmaster.sh v1.5.0**
 - Optional HEVC remux mode (`--skip-hevc`) with browser-safety checks
 - AAC audio strategy:
   - copy AAC streams as-is (no AAC-to-AAC re-encode)
-  - otherwise encode non-AAC streams to AAC 48kHz (`224k` target by default)
+  - otherwise encode non-AAC streams to AAC 48kHz (`256k` target by default)
 - Smart per-file quality adaptation (default on):
   - uses separate adaptation curves for CPU CRF vs VAAPI QP using source resolution + bitrate
+  - applies a v1.6 quality bias of `-1` to selected smart CRF/QP values
   - applies one tighter retry pass if output grows significantly (>105%)
   - supports fixed manual overrides with `--quality`, `--cpu-crf`, and `--vaapi-qp`
 - HDR handling:
@@ -23,10 +24,10 @@ Bundled core script: **Muxmaster.sh v1.5.0**
 - Subtitle and attachment retention with safe MP4 behavior
 - Automatic retry fallbacks for common FFmpeg failure modes
 - Safer directory handling (output cannot be inside input)
-- Pre-flight render plan output before each FFmpeg run (video/audio transcode vs copy)
-- Pink pre-flight conversion summary line (`audio in -> out`, `video in -> out`, `bitrate in -> expected`)
-- Pre-flight input and estimate summary (input resolution/bitrate + rough output bitrate range)
-- Simple end-of-run totals summary (`encoded`, `skipped`, `failed`)
+- Condensed one-line per-file `[INFO]` render summary (video, audio, container, subs/attachments, estimated bitrate)
+- Pink `[RENDER]` conversion summary line (`audio in -> out`, `video in -> out`, `bitrate in -> expected`)
+- Source bitrate outlier detection by resolution tier with orange console highlighting
+- End-of-run summary includes totals plus aggregate space savings (input vs output)
 - Ignores files found under `Extras` directories
 - Stronger show parsing for specials and grouped/year-tagged anime releases
 
@@ -102,8 +103,11 @@ Muxmaster.sh [OPTIONS] <input_dir> <output_dir>
   - VAAPI: `main10` when available, fallback to `main` (8-bit)
   - CPU: `main10`, `yuv420p10le`
 - Audio:
-  - target: AAC, up to stereo, `224k`, 48kHz for non-AAC sources
+  - target: AAC, up to stereo, `256k`, 48kHz for non-AAC sources
   - AAC source streams are copied directly (no AAC-to-AAC re-encode)
+- Smart quality:
+  - auto-selects per-file mode-specific CRF/QP from resolution + bitrate
+  - applies a v1.6 `-1` smart-bias to selected CRF/QP values
 - Subtitles:
   - MKV: copy subtitle streams
   - MP4: convert text subtitles to `mov_text`, skip bitmap-only subtitle cases
