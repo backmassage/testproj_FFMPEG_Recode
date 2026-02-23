@@ -65,6 +65,7 @@ declare -a TEMP_FILES=()
 declare -A TV_SHOW_YEAR_VARIANTS=()
 declare -A OUTPUT_PATH_OWNERS=()
 declare -A OUTPUT_PATH_COLLISION_COUNTER=()
+RESOLVED_OUTPUT_PATH=""
 
 # ANSI color palette
 RED=""; GREEN=""; YELLOW=""; ORANGE=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
@@ -2161,10 +2162,10 @@ resolve_output_path_for_input() {
     local requested_output="$2"
     local owner dir filename stem ext candidate counter
 
+    RESOLVED_OUTPUT_PATH="$requested_output"
     owner="${OUTPUT_PATH_OWNERS[$requested_output]:-}"
     if [[ -z "$owner" || "$owner" == "$input" ]]; then
         OUTPUT_PATH_OWNERS["$requested_output"]="$input"
-        printf '%s\n' "$requested_output"
         return 0
     fi
 
@@ -2181,7 +2182,7 @@ resolve_output_path_for_input() {
             OUTPUT_PATH_COLLISION_COUNTER["$requested_output"]=$((counter + 1))
             OUTPUT_PATH_OWNERS["$candidate"]="$input"
             log_warn "Output collision: $(basename "$filename") already claimed; remapping $(basename "$input") -> $(basename "$candidate")"
-            printf '%s\n' "$candidate"
+            RESOLVED_OUTPUT_PATH="$candidate"
             return 0
         fi
         ((counter++))
@@ -2393,7 +2394,8 @@ process_files() {
         fi
         local out
         out=$(get_output_path)
-        out=$(resolve_output_path_for_input "$f" "$out")
+        resolve_output_path_for_input "$f" "$out"
+        out="$RESOLVED_OUTPUT_PATH"
         local video_codec video_resolution video_bitrate_bps video_bitrate_label
         local bitrate_outlier_status source_bitrate_kbps outlier_low_kbps outlier_high_kbps outlier_tier
         video_codec=$(get_primary_video_codec "$f")
