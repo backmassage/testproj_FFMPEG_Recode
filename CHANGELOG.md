@@ -4,9 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- No unreleased changes yet.
+- Harmonized mixed TV show naming when one dataset contains both year-tagged and untagged variants (for example `Show (2022)` and `Show`): untagged entries now inherit the single unambiguous year-tagged variant to avoid split output folders.
 
 ## [1.6.0] - 2026-02-20
 

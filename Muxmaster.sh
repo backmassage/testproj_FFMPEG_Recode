@@ -62,6 +62,7 @@ SCRIPT_VERSION="1.6.0"
 
 # Temp file tracking for cleanup
 declare -a TEMP_FILES=()
+declare -A TV_SHOW_YEAR_VARIANTS=()
 
 # ANSI color palette
 RED=""; GREEN=""; YELLOW=""; ORANGE=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
@@ -1840,9 +1841,89 @@ run_encode_attempt() {
 #------------------------------------------------------------------------------
 # Filename parsing for TV/Movie classification
 #------------------------------------------------------------------------------
+extract_show_base_and_year_tag() {
+    local show_name="$1"
+    local base_show="$show_name"
+    local year_tag=""
+
+    if [[ "$show_name" =~ ^(.+)[[:space:]]+\((19[0-9]{2}|20[0-9]{2})(-[0-9]{4})?\)$ ]]; then
+        base_show=$(trim_whitespace "${BASH_REMATCH[1]}")
+        year_tag="${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+    fi
+
+    printf '%s\t%s\n' "$base_show" "$year_tag"
+}
+
+register_tv_show_year_variant() {
+    local show_name="$1"
+    local base_show year_tag variant_bucket existing_variant
+    local -a existing_variants=()
+
+    IFS=$'\t' read -r base_show year_tag <<< "$(extract_show_base_and_year_tag "$show_name")"
+    [[ -z "$year_tag" || -z "$base_show" ]] && return 0
+
+    variant_bucket="${TV_SHOW_YEAR_VARIANTS[$base_show]:-}"
+    if [[ -n "$variant_bucket" ]]; then
+        variant_bucket="${variant_bucket#|}"
+        variant_bucket="${variant_bucket%|}"
+        IFS='|' read -r -a existing_variants <<< "$variant_bucket"
+        for existing_variant in "${existing_variants[@]}"; do
+            [[ "$existing_variant" == "$show_name" ]] && return 0
+        done
+    fi
+
+    TV_SHOW_YEAR_VARIANTS["$base_show"]="${TV_SHOW_YEAR_VARIANTS[$base_show]:-}|$show_name|"
+}
+
+build_tv_year_variant_index() {
+    local f
+    TV_SHOW_YEAR_VARIANTS=()
+
+    for f in "$@"; do
+        parse_filename "$(basename "$f")" "$(dirname "$f")" true
+        if [[ "$MEDIA_TYPE" == "tv" && -n "$SHOW_NAME" ]]; then
+            register_tv_show_year_variant "$SHOW_NAME"
+        fi
+    done
+}
+
+harmonize_tv_show_name() {
+    local show_name="$1"
+    local base_show year_tag variant_bucket first_variant="" variant variant_count=0
+    local -a variants=()
+
+    IFS=$'\t' read -r base_show year_tag <<< "$(extract_show_base_and_year_tag "$show_name")"
+    if [[ -n "$year_tag" || -z "$base_show" ]]; then
+        printf '%s\n' "$show_name"
+        return 0
+    fi
+
+    variant_bucket="${TV_SHOW_YEAR_VARIANTS[$base_show]:-}"
+    if [[ -z "$variant_bucket" ]]; then
+        printf '%s\n' "$show_name"
+        return 0
+    fi
+
+    variant_bucket="${variant_bucket#|}"
+    variant_bucket="${variant_bucket%|}"
+    IFS='|' read -r -a variants <<< "$variant_bucket"
+    for variant in "${variants[@]}"; do
+        [[ -z "$variant" ]] && continue
+        ((variant_count++))
+        [[ -z "$first_variant" ]] && first_variant="$variant"
+    done
+
+    if (( variant_count == 1 )) && [[ -n "$first_variant" ]]; then
+        printf '%s\n' "$first_variant"
+    else
+        printf '%s\n' "$show_name"
+    fi
+}
+
 parse_filename() {
     local filename="$1"
     local parent_input="$2"
+    local suppress_debug="${3:-false}"
     local parent="$parent_input"
     local parent_lower
     local base="${filename%.*}"
@@ -2056,7 +2137,9 @@ parse_filename() {
     [[ "$MEDIA_TYPE" == "tv" && -z "$SHOW_NAME" ]] && SHOW_NAME="Unknown"
     [[ "$MEDIA_TYPE" == "movie" && -z "$MOVIE_NAME" ]] && MOVIE_NAME="Unknown"
 
-    log_debug "Parsed: $MEDIA_TYPE | show='$SHOW_NAME' S${SEASON:-?}E${EPISODE:-?} | movie='$MOVIE_NAME' (${YEAR:-no year})"
+    if [[ "$suppress_debug" != true ]]; then
+        log_debug "Parsed: $MEDIA_TYPE | show='$SHOW_NAME' S${SEASON:-?}E${EPISODE:-?} | movie='$MOVIE_NAME' (${YEAR:-no year})"
+    fi
 }
 
 get_output_path() {
@@ -2199,6 +2282,8 @@ process_files() {
         -type d -iname "extras" -prune -o \
         -type f -regextype posix-extended -iregex ".*\.($exts)$" -print0 | sort -z)
 
+    build_tv_year_variant_index "${files[@]}"
+
     local total=${#files[@]} current=0 encoded=0 skipped=0 failed=0
     local total_input_bytes=0 total_output_bytes=0
 
@@ -2263,6 +2348,13 @@ process_files() {
         fi
 
         parse_filename "$(basename "$f")" "$(dirname "$f")"
+        if [[ "$MEDIA_TYPE" == "tv" ]]; then
+            local parsed_show_name="$SHOW_NAME"
+            SHOW_NAME=$(harmonize_tv_show_name "$SHOW_NAME")
+            if [[ "$SHOW_NAME" != "$parsed_show_name" ]]; then
+                log_debug "Harmonized show name: '$parsed_show_name' -> '$SHOW_NAME'"
+            fi
+        fi
         local out
         out=$(get_output_path)
         local video_codec video_resolution video_bitrate_bps video_bitrate_label
