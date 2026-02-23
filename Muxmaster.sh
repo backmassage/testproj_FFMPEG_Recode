@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# Muxmaster Media Library Encoder v1.6.0
+# Muxmaster Media Library Encoder v1.7.0
 # Comprehensive HEVC/AAC encoding for Jellyfin optimization
 #===============================================================================
 
@@ -58,10 +58,14 @@ SMART_QUALITY=true
 INPUT_DIR=""
 OUTPUT_DIR=""
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.7.0"
 
 # Temp file tracking for cleanup
 declare -a TEMP_FILES=()
+declare -A TV_SHOW_YEAR_VARIANTS=()
+declare -A OUTPUT_PATH_OWNERS=()
+declare -A OUTPUT_PATH_COLLISION_COUNTER=()
+RESOLVED_OUTPUT_PATH=""
 
 # ANSI color palette
 RED=""; GREEN=""; YELLOW=""; ORANGE=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
@@ -182,7 +186,7 @@ Muxmaster v$SCRIPT_VERSION - Jellyfin-Optimized Media Encoder
 Usage: $SCRIPT_NAME [OPTIONS] <input_dir> <output_dir>
 
 Encoding Options:
-  -m, --mode <vaapi|cpu>    Encoder mode (default: vaapi)
+  -m, --mode <vaapi|cpu>    Encoder mode (default: vaapi hardware)
   -q, --quality <value>     Fixed quality for active mode (QP for VAAPI, CRF for CPU)
   --cpu-crf <value>         Fixed CPU CRF override (takes precedence over --quality in CPU mode)
   --vaapi-qp <value>        Fixed VAAPI QP override (takes precedence over --quality in VAAPI mode)
@@ -1314,7 +1318,7 @@ compute_smart_quality_settings() {
         fi
     fi
 
-    # V1.6 tuning: lower smart-selected quality values by 1 step for both render paths.
+    # V1.7 tuning: lower smart-selected quality values by 1 step for both render paths.
     selected_cpu_crf=$(clamp_int "$((CPU_CRF + cpu_adj - 1))" 16 30)
     selected_vaapi_qp=$(clamp_int "$((VAAPI_QP + vaapi_adj - 1))" 14 36)
     note="smart (${resolution_label}, ${bitrate_label}, cpu_adj=${cpu_adj}, vaapi_adj=${vaapi_adj}, smart_bias=-1, cpu_crf=${selected_cpu_crf}, vaapi_qp=${selected_vaapi_qp}, mode=${ENCODER_MODE})"
@@ -1840,9 +1844,89 @@ run_encode_attempt() {
 #------------------------------------------------------------------------------
 # Filename parsing for TV/Movie classification
 #------------------------------------------------------------------------------
+extract_show_base_and_year_tag() {
+    local show_name="$1"
+    local base_show="$show_name"
+    local year_tag=""
+
+    if [[ "$show_name" =~ ^(.+)[[:space:]]+\((19[0-9]{2}|20[0-9]{2})(-[0-9]{4})?\)$ ]]; then
+        base_show=$(trim_whitespace "${BASH_REMATCH[1]}")
+        year_tag="${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+    fi
+
+    printf '%s\t%s\n' "$base_show" "$year_tag"
+}
+
+register_tv_show_year_variant() {
+    local show_name="$1"
+    local base_show year_tag variant_bucket existing_variant
+    local -a existing_variants=()
+
+    IFS=$'\t' read -r base_show year_tag <<< "$(extract_show_base_and_year_tag "$show_name")"
+    [[ -z "$year_tag" || -z "$base_show" ]] && return 0
+
+    variant_bucket="${TV_SHOW_YEAR_VARIANTS[$base_show]:-}"
+    if [[ -n "$variant_bucket" ]]; then
+        variant_bucket="${variant_bucket#|}"
+        variant_bucket="${variant_bucket%|}"
+        IFS='|' read -r -a existing_variants <<< "$variant_bucket"
+        for existing_variant in "${existing_variants[@]}"; do
+            [[ "$existing_variant" == "$show_name" ]] && return 0
+        done
+    fi
+
+    TV_SHOW_YEAR_VARIANTS["$base_show"]="${TV_SHOW_YEAR_VARIANTS[$base_show]:-}|$show_name|"
+}
+
+build_tv_year_variant_index() {
+    local f
+    TV_SHOW_YEAR_VARIANTS=()
+
+    for f in "$@"; do
+        parse_filename "$(basename "$f")" "$(dirname "$f")" true
+        if [[ "$MEDIA_TYPE" == "tv" && -n "$SHOW_NAME" ]]; then
+            register_tv_show_year_variant "$SHOW_NAME"
+        fi
+    done
+}
+
+harmonize_tv_show_name() {
+    local show_name="$1"
+    local base_show year_tag variant_bucket first_variant="" variant variant_count=0
+    local -a variants=()
+
+    IFS=$'\t' read -r base_show year_tag <<< "$(extract_show_base_and_year_tag "$show_name")"
+    if [[ -n "$year_tag" || -z "$base_show" ]]; then
+        printf '%s\n' "$show_name"
+        return 0
+    fi
+
+    variant_bucket="${TV_SHOW_YEAR_VARIANTS[$base_show]:-}"
+    if [[ -z "$variant_bucket" ]]; then
+        printf '%s\n' "$show_name"
+        return 0
+    fi
+
+    variant_bucket="${variant_bucket#|}"
+    variant_bucket="${variant_bucket%|}"
+    IFS='|' read -r -a variants <<< "$variant_bucket"
+    for variant in "${variants[@]}"; do
+        [[ -z "$variant" ]] && continue
+        ((variant_count++))
+        [[ -z "$first_variant" ]] && first_variant="$variant"
+    done
+
+    if (( variant_count == 1 )) && [[ -n "$first_variant" ]]; then
+        printf '%s\n' "$first_variant"
+    else
+        printf '%s\n' "$show_name"
+    fi
+}
+
 parse_filename() {
     local filename="$1"
     local parent_input="$2"
+    local suppress_debug="${3:-false}"
     local parent="$parent_input"
     local parent_lower
     local base="${filename%.*}"
@@ -2056,7 +2140,9 @@ parse_filename() {
     [[ "$MEDIA_TYPE" == "tv" && -z "$SHOW_NAME" ]] && SHOW_NAME="Unknown"
     [[ "$MEDIA_TYPE" == "movie" && -z "$MOVIE_NAME" ]] && MOVIE_NAME="Unknown"
 
-    log_debug "Parsed: $MEDIA_TYPE | show='$SHOW_NAME' S${SEASON:-?}E${EPISODE:-?} | movie='$MOVIE_NAME' (${YEAR:-no year})"
+    if [[ "$suppress_debug" != true ]]; then
+        log_debug "Parsed: $MEDIA_TYPE | show='$SHOW_NAME' S${SEASON:-?}E${EPISODE:-?} | movie='$MOVIE_NAME' (${YEAR:-no year})"
+    fi
 }
 
 get_output_path() {
@@ -2069,6 +2155,38 @@ get_output_path() {
         [[ -n "$YEAR" ]] && name="$MOVIE_NAME ($YEAR)"
         echo "$OUTPUT_DIR/$name/${name}.${OUTPUT_CONTAINER}"
     fi
+}
+
+resolve_output_path_for_input() {
+    local input="$1"
+    local requested_output="$2"
+    local owner dir filename stem ext candidate counter
+
+    RESOLVED_OUTPUT_PATH="$requested_output"
+    owner="${OUTPUT_PATH_OWNERS[$requested_output]:-}"
+    if [[ -z "$owner" || "$owner" == "$input" ]]; then
+        OUTPUT_PATH_OWNERS["$requested_output"]="$input"
+        return 0
+    fi
+
+    dir=$(dirname "$requested_output")
+    filename=$(basename "$requested_output")
+    stem="${filename%.*}"
+    ext="${filename##*.}"
+    counter="${OUTPUT_PATH_COLLISION_COUNTER[$requested_output]:-1}"
+
+    while true; do
+        candidate="${dir}/${stem} - dup${counter}.${ext}"
+        owner="${OUTPUT_PATH_OWNERS[$candidate]:-}"
+        if [[ -z "$owner" || "$owner" == "$input" ]]; then
+            OUTPUT_PATH_COLLISION_COUNTER["$requested_output"]=$((counter + 1))
+            OUTPUT_PATH_OWNERS["$candidate"]="$input"
+            log_warn "Output collision: $(basename "$filename") already claimed; remapping $(basename "$input") -> $(basename "$candidate")"
+            RESOLVED_OUTPUT_PATH="$candidate"
+            return 0
+        fi
+        ((counter++))
+    done
 }
 
 #------------------------------------------------------------------------------
@@ -2199,6 +2317,10 @@ process_files() {
         -type d -iname "extras" -prune -o \
         -type f -regextype posix-extended -iregex ".*\.($exts)$" -print0 | sort -z)
 
+    build_tv_year_variant_index "${files[@]}"
+    OUTPUT_PATH_OWNERS=()
+    OUTPUT_PATH_COLLISION_COUNTER=()
+
     local total=${#files[@]} current=0 encoded=0 skipped=0 failed=0
     local total_input_bytes=0 total_output_bytes=0
 
@@ -2263,8 +2385,17 @@ process_files() {
         fi
 
         parse_filename "$(basename "$f")" "$(dirname "$f")"
+        if [[ "$MEDIA_TYPE" == "tv" ]]; then
+            local parsed_show_name="$SHOW_NAME"
+            SHOW_NAME=$(harmonize_tv_show_name "$SHOW_NAME")
+            if [[ "$SHOW_NAME" != "$parsed_show_name" ]]; then
+                log_debug "Harmonized show name: '$parsed_show_name' -> '$SHOW_NAME'"
+            fi
+        fi
         local out
         out=$(get_output_path)
+        resolve_output_path_for_input "$f" "$out"
+        out="$RESOLVED_OUTPUT_PATH"
         local video_codec video_resolution video_bitrate_bps video_bitrate_label
         local bitrate_outlier_status source_bitrate_kbps outlier_low_kbps outlier_high_kbps outlier_tier
         video_codec=$(get_primary_video_codec "$f")

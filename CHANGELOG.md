@@ -4,9 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Added deterministic output-path collision disambiguation (`- dupN` suffixing) so same-target filename mappings from different source files no longer overwrite/skip each other in batch runs.
+
+## [1.7.0] - 2026-02-23
+
 ### Changed
 
-- No unreleased changes yet.
+- Bumped bundled script version to `Muxmaster.sh v1.7.0`.
+- Updated README release metadata/default guidance for `1.7.0`.
+- Clarified hardware-default behavior in docs and CLI help (`vaapi` hardware acceleration is the default mode).
+- Updated smart-quality wording to reference the v1.7 `-1` smart-bias text.
+
+### Fixed
+
+- Harmonized mixed TV show naming when one dataset contains both year-tagged and untagged variants (for example `Show (2022)` and `Show`): untagged entries now inherit the single unambiguous year-tagged variant to avoid split output folders.
 
 ## [1.6.0] - 2026-02-20
 

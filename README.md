@@ -2,19 +2,19 @@
 
 > A resilient batch encoder/remuxer for Jellyfin-style media libraries.
 
-Release version: **1.6.0**  
-Bundled core script: **Muxmaster.sh v1.6.0**
+Release version: **1.7.0**  
+Bundled core script: **Muxmaster.sh v1.7.0**
 
 ## Highlights
 
-- HEVC encoding with `vaapi` (default) or `cpu` (`libx265`)
+- HEVC encoding with `vaapi` (default hardware path) or `cpu` (`libx265`)
 - Optional HEVC remux mode (`--skip-hevc`) with browser-safety checks
 - AAC audio strategy:
   - copy AAC streams as-is (no AAC-to-AAC re-encode)
   - otherwise encode non-AAC streams to AAC 48kHz (`256k` target by default)
 - Smart per-file quality adaptation (default on):
   - uses separate adaptation curves for CPU CRF vs VAAPI QP using source resolution + bitrate
-  - applies a v1.6 quality bias of `-1` to selected smart CRF/QP values
+  - applies a v1.7 quality bias of `-1` to selected smart CRF/QP values
   - applies one tighter retry pass if output grows significantly (>105%)
   - supports fixed manual overrides with `--quality`, `--cpu-crf`, and `--vaapi-qp`
 - HDR handling:
@@ -45,6 +45,12 @@ Bundled core script: **Muxmaster.sh v1.6.0**
 
 ```bash
 chmod +x Muxmaster.sh
+./Muxmaster.sh "/path/to/input" "/path/to/output"
+```
+
+CPU fallback:
+
+```bash
 ./Muxmaster.sh -m cpu "/path/to/input" "/path/to/output"
 ```
 
@@ -107,7 +113,7 @@ Muxmaster.sh [OPTIONS] <input_dir> <output_dir>
   - AAC source streams are copied directly (no AAC-to-AAC re-encode)
 - Smart quality:
   - auto-selects per-file mode-specific CRF/QP from resolution + bitrate
-  - applies a v1.6 `-1` smart-bias to selected CRF/QP values
+  - applies a v1.7 `-1` smart-bias to selected CRF/QP values
 - Subtitles:
   - MKV: copy subtitle streams
   - MP4: convert text subtitles to `mov_text`, skip bitmap-only subtitle cases
