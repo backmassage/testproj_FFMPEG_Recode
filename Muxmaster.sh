@@ -63,6 +63,8 @@ SCRIPT_VERSION="1.7.0"
 # Temp file tracking for cleanup
 declare -a TEMP_FILES=()
 declare -A TV_SHOW_YEAR_VARIANTS=()
+declare -A OUTPUT_PATH_OWNERS=()
+declare -A OUTPUT_PATH_COLLISION_COUNTER=()
 
 # ANSI color palette
 RED=""; GREEN=""; YELLOW=""; ORANGE=""; BLUE=""; CYAN=""; MAGENTA=""; NC=""
@@ -2154,6 +2156,38 @@ get_output_path() {
     fi
 }
 
+resolve_output_path_for_input() {
+    local input="$1"
+    local requested_output="$2"
+    local owner dir filename stem ext candidate counter
+
+    owner="${OUTPUT_PATH_OWNERS[$requested_output]:-}"
+    if [[ -z "$owner" || "$owner" == "$input" ]]; then
+        OUTPUT_PATH_OWNERS["$requested_output"]="$input"
+        printf '%s\n' "$requested_output"
+        return 0
+    fi
+
+    dir=$(dirname "$requested_output")
+    filename=$(basename "$requested_output")
+    stem="${filename%.*}"
+    ext="${filename##*.}"
+    counter="${OUTPUT_PATH_COLLISION_COUNTER[$requested_output]:-1}"
+
+    while true; do
+        candidate="${dir}/${stem} - dup${counter}.${ext}"
+        owner="${OUTPUT_PATH_OWNERS[$candidate]:-}"
+        if [[ -z "$owner" || "$owner" == "$input" ]]; then
+            OUTPUT_PATH_COLLISION_COUNTER["$requested_output"]=$((counter + 1))
+            OUTPUT_PATH_OWNERS["$candidate"]="$input"
+            log_warn "Output collision: $(basename "$filename") already claimed; remapping $(basename "$input") -> $(basename "$candidate")"
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        ((counter++))
+    done
+}
+
 #------------------------------------------------------------------------------
 # Encode a single file with retry logic
 #------------------------------------------------------------------------------
@@ -2283,6 +2317,8 @@ process_files() {
         -type f -regextype posix-extended -iregex ".*\.($exts)$" -print0 | sort -z)
 
     build_tv_year_variant_index "${files[@]}"
+    OUTPUT_PATH_OWNERS=()
+    OUTPUT_PATH_COLLISION_COUNTER=()
 
     local total=${#files[@]} current=0 encoded=0 skipped=0 failed=0
     local total_input_bytes=0 total_output_bytes=0
@@ -2357,6 +2393,7 @@ process_files() {
         fi
         local out
         out=$(get_output_path)
+        out=$(resolve_output_path_for_input "$f" "$out")
         local video_codec video_resolution video_bitrate_bps video_bitrate_label
         local bitrate_outlier_status source_bitrate_kbps outlier_low_kbps outlier_high_kbps outlier_tier
         video_codec=$(get_primary_video_codec "$f")

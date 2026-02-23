@@ -4,9 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- No unreleased changes yet.
+- Added deterministic output-path collision disambiguation (`- dupN` suffixing) so same-target filename mappings from different source files no longer overwrite/skip each other in batch runs.
 
 ## [1.7.0] - 2026-02-23
 
