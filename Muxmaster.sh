@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# Muxmaster Media Library Encoder v1.6.0
+# Muxmaster Media Library Encoder v1.7.0
 # Comprehensive HEVC/AAC encoding for Jellyfin optimization
 #===============================================================================
 
@@ -58,7 +58,7 @@ SMART_QUALITY=true
 INPUT_DIR=""
 OUTPUT_DIR=""
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.7.0"
 
 # Temp file tracking for cleanup
 declare -a TEMP_FILES=()
@@ -183,7 +183,7 @@ Muxmaster v$SCRIPT_VERSION - Jellyfin-Optimized Media Encoder
 Usage: $SCRIPT_NAME [OPTIONS] <input_dir> <output_dir>
 
 Encoding Options:
-  -m, --mode <vaapi|cpu>    Encoder mode (default: vaapi)
+  -m, --mode <vaapi|cpu>    Encoder mode (default: vaapi hardware)
   -q, --quality <value>     Fixed quality for active mode (QP for VAAPI, CRF for CPU)
   --cpu-crf <value>         Fixed CPU CRF override (takes precedence over --quality in CPU mode)
   --vaapi-qp <value>        Fixed VAAPI QP override (takes precedence over --quality in VAAPI mode)
@@ -1315,7 +1315,7 @@ compute_smart_quality_settings() {
         fi
     fi
 
-    # V1.6 tuning: lower smart-selected quality values by 1 step for both render paths.
+    # V1.7 tuning: lower smart-selected quality values by 1 step for both render paths.
     selected_cpu_crf=$(clamp_int "$((CPU_CRF + cpu_adj - 1))" 16 30)
     selected_vaapi_qp=$(clamp_int "$((VAAPI_QP + vaapi_adj - 1))" 14 36)
     note="smart (${resolution_label}, ${bitrate_label}, cpu_adj=${cpu_adj}, vaapi_adj=${vaapi_adj}, smart_bias=-1, cpu_crf=${selected_cpu_crf}, vaapi_qp=${selected_vaapi_qp}, mode=${ENCODER_MODE})"
